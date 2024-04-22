@@ -1,8 +1,20 @@
-// node_modules/.deno/@hono+node-server@1.9.1/node_modules/@hono/node-server/dist/index.mjs
+// node_modules/.deno/@hono+node-server@1.11.0/node_modules/@hono/node-server/dist/index.mjs
 import { createServer as createServerHTTP } from "http";
 import { Http2ServerRequest } from "http2";
 import { Readable } from "stream";
 import crypto2 from "crypto";
+var RequestError = class extends Error {
+  static name = "RequestError";
+  constructor(message, options) {
+    super(message, options);
+  }
+};
+var toRequestError = (e) => {
+  if (e instanceof RequestError) {
+    return e;
+  }
+  return new RequestError(e.message, { cause: e });
+};
 var GlobalRequest = global.Request;
 var Request2 = class extends GlobalRequest {
   constructor(input, options) {
@@ -16,9 +28,6 @@ var Request2 = class extends GlobalRequest {
     super(input, options);
   }
 };
-Object.defineProperty(global, "Request", {
-  value: Request2
-});
 var newRequestFromIncoming = (method, url, incoming, abortController) => {
   const headerRecord = [];
   const rawHeaders = incoming.rawHeaders;
@@ -95,12 +104,20 @@ var requestPrototype = {
   });
 });
 Object.setPrototypeOf(requestPrototype, Request2.prototype);
-var newRequest = (incoming) => {
+var newRequest = (incoming, defaultHostname) => {
   const req = Object.create(requestPrototype);
   req[incomingKey] = incoming;
-  req[urlKey] = new URL(
-    `${incoming instanceof Http2ServerRequest || incoming.socket && incoming.socket.encrypted ? "https" : "http"}://${incoming instanceof Http2ServerRequest ? incoming.authority : incoming.headers.host}${incoming.url}`
-  ).href;
+  const host = (incoming instanceof Http2ServerRequest ? incoming.authority : incoming.headers.host) || defaultHostname;
+  if (!host) {
+    throw new RequestError("Missing host header");
+  }
+  const url = new URL(
+    `${incoming instanceof Http2ServerRequest || incoming.socket && incoming.socket.encrypted ? "https" : "http"}://${host}${incoming.url}`
+  );
+  if (url.hostname.length !== host.length && url.hostname !== host.replace(/:\d+$/, "")) {
+    throw new RequestError("Invalid host header");
+  }
+  req[urlKey] = url.href;
   return req;
 };
 function writeFromReadableStream(stream, writable) {
@@ -220,9 +237,6 @@ var Response2 = class _Response {
 });
 Object.setPrototypeOf(Response2, GlobalResponse);
 Object.setPrototypeOf(Response2.prototype, GlobalResponse.prototype);
-Object.defineProperty(global, "Response", {
-  value: Response2
-});
 var stateKey = Reflect.ownKeys(new GlobalResponse()).find(
   (k) => typeof k === "symbol" && k.toString() === "Symbol(state)"
 );
@@ -255,6 +269,9 @@ global.fetch = (info, init) => {
 };
 var regBuffer = /^no$/i;
 var regContentType = /^(application\/json\b|text\/(?!event-stream\b))/i;
+var handleRequestError = () => new Response(null, {
+  status: 400
+});
 var handleFetchError = (e) => new Response(null, {
   status: e instanceof Error && (e.name === "TimeoutError" || e.constructor.name === "TimeoutError") ? 504 : 500
 });
@@ -342,15 +359,23 @@ var responseViaResponseObject = async (res, outgoing, options = {}) => {
   }
 };
 var getRequestListener = (fetchCallback, options = {}) => {
-  return async (incoming, outgoing) => {
-    let res;
-    const req = newRequest(incoming);
-    outgoing.on("close", () => {
-      if (incoming.destroyed) {
-        req[getAbortController]().abort();
-      }
+  if (options.overrideGlobalObjects !== false && global.Request !== Request2) {
+    Object.defineProperty(global, "Request", {
+      value: Request2
     });
+    Object.defineProperty(global, "Response", {
+      value: Response2
+    });
+  }
+  return async (incoming, outgoing) => {
+    let res, req;
     try {
+      req = newRequest(incoming, options.hostname);
+      outgoing.on("close", () => {
+        if (incoming.destroyed) {
+          req[getAbortController]().abort();
+        }
+      });
       res = fetchCallback(req, { incoming, outgoing });
       if (cacheKey in res) {
         return responseViaCache(res, outgoing);
@@ -358,10 +383,12 @@ var getRequestListener = (fetchCallback, options = {}) => {
     } catch (e) {
       if (!res) {
         if (options.errorHandler) {
-          res = await options.errorHandler(e);
+          res = await options.errorHandler(req ? e : toRequestError(e));
           if (!res) {
             return;
           }
+        } else if (!req) {
+          res = handleRequestError();
         } else {
           res = handleFetchError(e);
         }
@@ -378,7 +405,10 @@ var getRequestListener = (fetchCallback, options = {}) => {
 };
 var createAdaptorServer = (options) => {
   const fetchCallback = options.fetch;
-  const requestListener = getRequestListener(fetchCallback);
+  const requestListener = getRequestListener(fetchCallback, {
+    hostname: options.hostname,
+    overrideGlobalObjects: options.overrideGlobalObjects
+  });
   const createServer = options.createServer || createServerHTTP;
   const server = createServer(options.serverOptions || {}, requestListener);
   return server;
@@ -392,7 +422,7 @@ var serve = (options, listeningListener) => {
   return server;
 };
 
-// node_modules/.deno/itty-router@5.0.9/node_modules/itty-router/index.mjs
+// node_modules/.deno/itty-router@5.0.16/node_modules/itty-router/index.mjs
 var t = ({ base: e = "", routes: t2 = [], ...r2 } = {}) => ({ __proto__: new Proxy({}, { get: (r3, o2, a2, s2) => (r4, ...c) => t2.push([o2.toUpperCase?.(), RegExp(`^${(s2 = (e + r4).replace(/\/+(\/|$)/g, "$1")).replace(/(\/?\.?):(\w+)\+/g, "($1(?<$2>*))").replace(/(\/?\.?):(\w+)/g, "($1(?<$2>[^$1/]+?))").replace(/\./g, "\\.").replace(/(\/?)\*/g, "($1.*)?")}/*$`), c, s2]) && a2 }), routes: t2, ...r2, async fetch(e2, ...o2) {
   let a2, s2, c = new URL(e2.url), n = e2.query = { __proto__: null };
   for (let [e3, t3] of c.searchParams)
@@ -425,10 +455,10 @@ var t = ({ base: e = "", routes: t2 = [], ...r2 } = {}) => ({ __proto__: new Pro
   }
   return a2;
 } });
-var r = (e = "text/plain; charset=utf-8", t2) => (r2, { ...o2 } = {}) => {
+var r = (e = "text/plain; charset=utf-8", t2) => (r2, o2 = {}) => {
   if (void 0 === r2 || r2 instanceof Response)
     return r2;
-  const a2 = new Response(t2?.(r2) ?? r2, o2);
+  const a2 = new Response(t2?.(r2) ?? r2, o2.url ? void 0 : o2);
   return a2.headers.set("content-type", e), a2;
 };
 var o = r("application/json; charset=utf-8", JSON.stringify);
@@ -525,25 +555,8 @@ function openAiMessageToGeminiMessage(messages) {
   });
   return result;
 }
-function hasImageMessage(messages) {
-  return messages.some((msg) => {
-    const content = msg.content;
-    if (content == null) {
-      return false;
-    }
-    if (typeof content === "string") {
-      return false;
-    }
-    return content.some((it) => it.type === "image_url");
-  });
-}
 function genModel(req) {
-  let model = "gemini-1.0-pro-latest";
-  if (!hasImageMessage(req.messages)) {
-    model = ModelMapping[req.model] ?? "gemini-1.0-pro-latest";
-  } else {
-    model = "gemini-1.0-pro-vision-latest";
-  }
+  const model = ModelMapping[req.model] ?? "gemini-1.0-pro-latest";
   let functions = req.tools?.filter((it) => it.type === "function")?.map((it) => it.function) ?? [];
   functions = functions.concat(req.functions ?? []);
   const generateContentRequest = {
@@ -573,6 +586,8 @@ function genModel(req) {
 var ModelMapping = {
   "gpt-3.5-turbo": "gemini-1.0-pro-latest",
   // "gpt-4": "gemini-1.0-ultra-latest",
+  "gpt-4-vision-preview": "gemini-1.0-pro-vision-latest",
+  "gpt-4-turbo": "gemini-1.5-pro-latest",
   "gpt-4-turbo-preview": "gemini-1.5-pro-latest"
 };
 function getRuntimeKey() {
@@ -921,46 +936,22 @@ var modelData = [
     id: "gpt-3.5-turbo"
   },
   {
-    created: 1677649963,
-    object: "model",
-    owned_by: "openai",
-    id: "gpt-3.5-turbo-0301"
-  },
-  {
-    created: 1686587434,
-    object: "model",
-    owned_by: "openai",
-    id: "gpt-3.5-turbo-0613"
-  },
-  {
-    created: 1683758102,
-    object: "model",
-    owned_by: "openai-internal",
-    id: "gpt-3.5-turbo-16k"
-  },
-  {
     created: 1685474247,
     object: "model",
     owned_by: "openai",
-    id: "gpt-3.5-turbo-16k-0613"
+    id: "gpt-4-vision-preview"
   },
   {
     created: 1687882411,
     object: "model",
     owned_by: "openai",
-    id: "gpt-4"
+    id: "gpt-4-turbo"
   },
   {
-    created: 1687882410,
+    created: 1687882412,
     object: "model",
     owned_by: "openai",
-    id: "gpt-4-0314"
-  },
-  {
-    created: 1686588896,
-    object: "model",
-    owned_by: "openai",
-    id: "gpt-4-0613"
+    id: "gpt-4-turbo-preview"
   }
 ];
 var models = () => {
