@@ -121,12 +121,14 @@ function genModel(req) {
   const model = ModelMapping[req.model] ?? "gemini-1.0-pro-latest";
   let functions = req.tools?.filter((it) => it.type === "function")?.map((it) => it.function) ?? [];
   functions = functions.concat(req.functions ?? []);
+  const responseMimeType = req.response_format?.type === "json_object" ? "application/json" : "text/plain";
   const generateContentRequest = {
     contents: openAiMessageToGeminiMessage(req.messages),
     generationConfig: {
       maxOutputTokens: req.max_tokens ?? void 0,
       temperature: req.temperature ?? void 0,
-      topP: req.top_p ?? void 0
+      topP: req.top_p ?? void 0,
+      responseMimeType
     },
     tools: functions.length === 0 ? void 0 : [
       {
@@ -557,7 +559,7 @@ var app = t({
     o
   ]
 });
-app.get("/", (c) => hello(c));
+app.get("/", hello);
 app.post("/v1/chat/completions", chatProxyHandler);
 app.get("/v1/models", () => Response.json(models()));
 app.get("/v1/models/:model", (c) => Response.json(modelDetail(c.params.model)));
